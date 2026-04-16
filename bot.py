@@ -4,13 +4,6 @@
 """
 ╔══════════════════════════════════════════════════════════════╗
 ║                                                              ║
-║   ██████╗  ██████╗ ████████╗██╗  ██╗███████╗██╗██████╗     ║
-║   ██╔══██╗██╔═══██╗╚══██╔══╝██║  ██║██╔════╝██║██╔══██╗    ║
-║   ██████╔╝██║   ██║   ██║   ███████║█████╗  ██║██████╔╝    ║
-║   ██╔══██╗██║   ██║   ██║   ██╔══██║██╔══╝  ██║██╔═══╝     ║
-║   ██████╔╝╚██████╔╝   ██║   ██║  ██║███████╗██║██║         ║
-║   ╚═════╝  ╚═════╝    ╚═╝   ╚═╝  ╚═╝╚══════╝╚═╝╚═╝         ║
-║                                                              ║
 ║                BotHelper v1.0                               ║
 ║         Telegram Business Moderator                         ║
 ╚══════════════════════════════════════════════════════════════╝
@@ -47,10 +40,7 @@ logger = logging.getLogger(__name__)
 
 # ==================== БИБЛИОТЕКИ ====================
 from aiogram import Bot, Dispatcher, types
-from aiogram.types import (
-    Message, CallbackQuery, InlineKeyboardMarkup, 
-    InlineKeyboardButton, BusinessConnection, BusinessMessagesDeleted
-)
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message, CallbackQuery
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -218,105 +208,6 @@ def get_back_keyboard() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="◀️ Назад в меню", callback_data="back_to_main")]
     ])
 
-# ==================== BUSINESS MODE ХЕНДЛЕРЫ ====================
-
-@dp.business_connection()
-async def on_business_connection(connection: BusinessConnection):
-    user_id = connection.user.id
-    user = await bot.get_chat(user_id)
-    db.add_user(user_id, user.username, user.first_name)
-    
-    await bot.send_message(
-        OWNER_ID,
-        f"🔌 <b>🆕 Новое подключение!</b>\n\n"
-        f"👤 <b>Пользователь:</b> <a href='tg://user?id={user_id}'>{user.first_name}</a>\n"
-        f"🆔 <b>ID:</b> <code>{user_id}</code>\n"
-        f"📅 <b>Дата:</b> {datetime.now().strftime('%d.%m.%Y %H:%M')}",
-        parse_mode="HTML"
-    )
-    
-    await bot.send_message(
-        connection.user_chat_id,
-        f"<b>✨ Добро пожаловать в BotHelper!</b>\n\n"
-        f"🤖 <b>Я ваш персональный помощник для Telegram Business</b>\n\n"
-        f"📌 <b>Что я умею:</b>\n"
-        f"• 🔄 Отслеживаю <b>изменённые</b> сообщения\n"
-        f"• 🗑️ Отслеживаю <b>удалённые</b> сообщения\n"
-        f"• 🔇 Мут пользователей <code>.mute</code>\n"
-        f"• 🤖 Автоответчик <code>.auto</code>\n"
-        f"• 🛡️ Проверка безопасности <code>.check</code>\n"
-        f"• ❓ Справка <code>.help</code>\n\n"
-        f"💡 <b>Совет:</b> Ответьте на сообщение пользователя и отправьте команду!",
-        parse_mode="HTML"
-    )
-
-@dp.edited_business_message()
-async def on_edited_business_message(message: Message):
-    user = message.from_user
-    chat_id = message.chat.id
-    
-    cached = message_cache.get(message.message_id, {})
-    old_text = cached.get("text", "❓ Не удалось получить предыдущий текст")
-    new_text = message.text or message.caption or "[📎 Медиафайл]"
-    
-    message_cache[message.message_id] = {
-        "text": new_text,
-        "user_id": user.id,
-        "username": user.username or user.first_name
-    }
-    
-    await bot.send_message(
-        chat_id,
-        f"<b>✏️ ИЗМЕНЕНИЕ СООБЩЕНИЯ</b>\n\n"
-        f"👤 <b>Пользователь:</b> <a href='tg://user?id={user.id}'>{user.first_name}</a>\n"
-        f"🆔 <b>ID:</b> <code>{user.id}</code>\n\n"
-        f"<b>📝 БЫЛО:</b>\n<blockquote>{old_text[:300]}</blockquote>\n\n"
-        f"<b>🔄 СТАЛО:</b>\n<blockquote>{new_text[:300]}</blockquote>",
-        parse_mode="HTML"
-    )
-
-@dp.business_messages_deleted()
-async def on_business_messages_deleted(deleted: BusinessMessagesDeleted):
-    chat_id = deleted.chat.id
-    
-    deleted_texts = []
-    for msg_id in deleted.message_ids[:5]:
-        cached = message_cache.get(msg_id, {})
-        if cached:
-            user_name = cached.get("username", "Unknown")
-            text = cached.get("text", "")
-            deleted_texts.append(f"• <b>{user_name}</b>: {text[:100]}")
-    
-    if deleted_texts:
-        text = f"<b>🗑️ УДАЛЕНИЕ СООБЩЕНИЙ</b>\n\n" + "\n".join(deleted_texts)
-    else:
-        text = f"<b>🗑️ УДАЛЕНИЕ СООБЩЕНИЙ</b>\n\nУдалено сообщений: <b>{len(deleted.message_ids)}</b>"
-    
-    if len(deleted.message_ids) > 5:
-        text += f"\n\n... и ещё {len(deleted.message_ids) - 5} сообщений"
-    
-    await bot.send_message(chat_id, text, parse_mode="HTML")
-    
-    for msg_id in deleted.message_ids:
-        message_cache.pop(msg_id, None)
-
-@dp.business_message()
-async def on_business_message(message: Message):
-    if message.from_user.is_bot:
-        return
-    
-    text = message.text or message.caption or ""
-    message_cache[message.message_id] = {
-        "text": text,
-        "user_id": message.from_user.id,
-        "username": message.from_user.username or message.from_user.first_name,
-        "date": datetime.now().isoformat()
-    }
-    
-    if len(message_cache) > 500:
-        oldest_key = min(message_cache.keys())
-        del message_cache[oldest_key]
-
 # ==================== ОСНОВНЫЕ КОМАНДЫ ====================
 
 @dp.message(Command("start"))
@@ -334,6 +225,7 @@ async def cmd_start(message: Message):
         f"• 🔄 Отслеживаю <b>изменённые</b> сообщения\n"
         f"• 🗑️ Отслеживаю <b>удалённые</b> сообщения\n"
         f"• 🔇 Мут пользователей (<code>.mute</code>)\n"
+        f"• 🔊 Размут пользователей (<code>.unmute</code>)\n"
         f"• 🤖 Автоответчик (<code>.auto</code>)\n"
         f"• 🛡️ Проверка безопасности (<code>.check</code>)\n"
         f"• ❓ Справка (<code>.help</code>)\n\n"
@@ -347,7 +239,6 @@ async def cmd_start(message: Message):
 
 @dp.message(Command("help"))
 async def cmd_help(message: Message):
-    """Справка по командам (работает в чатах с пользователями и в избранном)"""
     await message.answer(
         f"<b>❓ ПОМОЩЬ ПО КОМАНДАМ</b>\n\n"
         f"┌─────────────────────────────────────────────────────┐\n"
@@ -405,6 +296,7 @@ async def about_callback(callback: CallbackQuery):
         f"✅ Отслеживание изменённых сообщений\n"
         f"✅ Уведомления в реальном времени\n"
         f"✅ Мут пользователей (.mute)\n"
+        f"✅ Размут пользователей (.unmute)\n"
         f"✅ Автоответчик (.auto)\n"
         f"✅ Проверка безопасности (.check)\n\n"
         f"<b>🔗 Ссылки:</b>\n"
@@ -579,7 +471,7 @@ async def back_to_main_callback(callback: CallbackQuery):
         parse_mode="HTML"
     )
 
-# ==================== КОМАНДЫ В БИЗНЕС-ЧАТЕ ====================
+# ==================== КОМАНДЫ В ЧАТАХ ====================
 
 @dp.message(Command("mute"))
 async def mute_command(message: Message):
@@ -615,7 +507,7 @@ async def mute_command(message: Message):
 async def unmute_command(message: Message):
     """Размутить пользователя"""
     if not message.reply_to_message:
-        await message.reply("❌ <b>Ошибка!</b>\n\nОтветьте на сообщение пользователя.", parse_mode="HTML")
+        await message.reply("❌ <b>Ошибка!</b>\n\nОтветьте на сообщение пользователя, которого хотите размутить.", parse_mode="HTML")
         return
     
     target = message.reply_to_message.from_user
@@ -729,13 +621,6 @@ async def main():
     print("""
 ╔══════════════════════════════════════════════════════════════╗
 ║                                                              ║
-║   ██████╗  ██████╗ ████████╗██╗  ██╗███████╗██╗██████╗     ║
-║   ██╔══██╗██╔═══██╗╚══██╔══╝██║  ██║██╔════╝██║██╔══██╗    ║
-║   ██████╔╝██║   ██║   ██║   ███████║█████╗  ██║██████╔╝    ║
-║   ██╔══██╗██║   ██║   ██║   ██╔══██║██╔══╝  ██║██╔═══╝     ║
-║   ██████╔╝╚██████╔╝   ██║   ██║  ██║███████╗██║██║         ║
-║   ╚═════╝  ╚═════╝    ╚═╝   ╚═╝  ╚═╝╚══════╝╚═╝╚═╝         ║
-║                                                              ║
 ║                BotHelper v1.0                               ║
 ║         Telegram Business Moderator                         ║
 ╚══════════════════════════════════════════════════════════════╝
@@ -744,6 +629,12 @@ async def main():
     logger.info(f"👑 Владелец: {OWNER_ID}")
     logger.info(f"📢 Канал: {OFFICIAL_CHANNEL}")
     logger.info(f"📞 Поддержка: @{SUPPORT_USERNAME}")
+    
+    # Отправляем сообщение владельцу, что бот работает
+    try:
+        await bot.send_message(OWNER_ID, "<b>✅ BotHelper запущен и работает!</b>\n\nБот готов к работе.", parse_mode="HTML")
+    except:
+        pass
     
     await dp.start_polling(bot)
 
