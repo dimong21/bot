@@ -57,9 +57,15 @@ message_cache: Dict[int, Dict] = {}
 def init_db():
     conn = sqlite3.connect(DATABASE_FILE)
     cursor = conn.cursor()
-    cursor.execute('''CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, username TEXT, first_name TEXT, connected_at TEXT, is_active INTEGER DEFAULT 1)''')
+    # Все пользователи (кто написал /start)
+    cursor.execute('''CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, username TEXT, first_name TEXT, created_at TEXT, is_active INTEGER DEFAULT 1)''')
+    # Подключившие бота через Business
+    cursor.execute('''CREATE TABLE IF NOT EXISTS business_users (user_id INTEGER PRIMARY KEY, username TEXT, first_name TEXT, connected_at TEXT)''')
+    # Мут-лист
     cursor.execute('''CREATE TABLE IF NOT EXISTS muted (user_id INTEGER PRIMARY KEY, muted_by INTEGER, muted_at TEXT, reason TEXT)''')
+    # Автоответчики
     cursor.execute('''CREATE TABLE IF NOT EXISTS autoreplies (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, command TEXT, response TEXT, created_at TEXT)''')
+    # Проверка безопасности
     cursor.execute('''CREATE TABLE IF NOT EXISTS safety_check (user_id INTEGER PRIMARY KEY, is_safe INTEGER DEFAULT 1, last_check TEXT, notes TEXT)''')
     conn.commit()
     conn.close()
@@ -68,11 +74,12 @@ def init_db():
 init_db()
 
 class Database:
+    # ========== ОБЩИЕ ПОЛЬЗОВАТЕЛИ (кто написал /start) ==========
     @staticmethod
     def add_user(user_id, username, first_name):
         conn = sqlite3.connect(DATABASE_FILE)
         cursor = conn.cursor()
-        cursor.execute('INSERT OR REPLACE INTO users (user_id, username, first_name, connected_at, is_active) VALUES (?, ?, ?, ?, 1)', 
+        cursor.execute('INSERT OR IGNORE INTO users (user_id, username, first_name, created_at, is_active) VALUES (?, ?, ?, ?, 1)', 
                        (user_id, username or "", first_name or "", datetime.now().isoformat()))
         conn.commit()
         conn.close()
@@ -81,7 +88,7 @@ class Database:
     def get_all_users():
         conn = sqlite3.connect(DATABASE_FILE)
         cursor = conn.cursor()
-        cursor.execute('SELECT user_id, username, first_name, connected_at FROM users WHERE is_active = 1')
+        cursor.execute('SELECT user_id, username, first_name, created_at FROM users WHERE is_active = 1')
         users = cursor.fetchall()
         conn.close()
         return users
@@ -95,6 +102,44 @@ class Database:
         conn.close()
         return count
     
+    # ========== BUSINESS ПОЛЬЗОВАТЕЛИ (кто подключил бота) ==========
+    @staticmethod
+    def add_business_user(user_id, username, first_name):
+        conn = sqlite3.connect(DATABASE_FILE)
+        cursor = conn.cursor()
+        cursor.execute('INSERT OR REPLACE INTO business_users (user_id, username, first_name, connected_at) VALUES (?, ?, ?, ?)', 
+                       (user_id, username or "", first_name or "", datetime.now().isoformat()))
+        conn.commit()
+        conn.close()
+    
+    @staticmethod
+    def get_all_business_users():
+        conn = sqlite3.connect(DATABASE_FILE)
+        cursor = conn.cursor()
+        cursor.execute('SELECT user_id, username, first_name, connected_at FROM business_users')
+        users = cursor.fetchall()
+        conn.close()
+        return users
+    
+    @staticmethod
+    def get_business_user_count():
+        conn = sqlite3.connect(DATABASE_FILE)
+        cursor = conn.cursor()
+        cursor.execute('SELECT COUNT(*) FROM business_users')
+        count = cursor.fetchone()[0]
+        conn.close()
+        return count
+    
+    @staticmethod
+    def is_business_user(user_id):
+        conn = sqlite3.connect(DATABASE_FILE)
+        cursor = conn.cursor()
+        cursor.execute('SELECT 1 FROM business_users WHERE user_id = ?', (user_id,))
+        result = cursor.fetchone()
+        conn.close()
+        return result is not None
+    
+    # ========== МУТ ==========
     @staticmethod
     def add_mute(user_id, muted_by, reason=""):
         conn = sqlite3.connect(DATABASE_FILE)
@@ -121,6 +166,16 @@ class Database:
         conn.close()
         return result is not None
     
+    @staticmethod
+    def get_muted_count():
+        conn = sqlite3.connect(DATABASE_FILE)
+        cursor = conn.cursor()
+        cursor.execute('SELECT COUNT(*) FROM muted')
+        count = cursor.fetchone()[0]
+        conn.close()
+        return count
+    
+    # ========== АВТООТВЕТЧИКИ ==========
     @staticmethod
     def add_autoreply(user_id, command, response):
         conn = sqlite3.connect(DATABASE_FILE)
@@ -156,6 +211,7 @@ class Database:
         conn.close()
         return rows
     
+    # ========== БЕЗОПАСНОСТЬ ==========
     @staticmethod
     def set_safety(user_id, is_safe, notes=""):
         conn = sqlite3.connect(DATABASE_FILE)
@@ -181,6 +237,7 @@ db = Database()
 # ==================== FSM ====================
 class BroadcastState(StatesGroup):
     waiting_for_message = State()
+    waiting_for_target = State()  # Кому отправлять рассылку
 
 # ==================== КЛАВИАТУРЫ ====================
 def get_main_keyboard(is_owner: bool = False) -> InlineKeyboardMarkup:
@@ -188,10 +245,10 @@ def get_main_keyboard(is_owner: bool = False) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="📖 О BotHelper", callback_data="about")],
         [InlineKeyboardButton(text="🔌 Как подключить", callback_data="how_to_connect")],
         [InlineKeyboardButton(text="📞 Техподдержка", callback_data="support")],
-        [InlineKeyboardButton(text="📢 Наш канал", url=OFFICIAL_CHANNEL)],
-        [InlineKeyboardButton(text="📊 Статистика", callback_data="stats")]
+        [InlineKeyboardButton(text="📢 Наш канал", url=OFFICIAL_CHANNEL)]
     ]
     if is_owner:
+        keyboard.append([InlineKeyboardButton(text="📊 Статистика", callback_data="stats")])
         keyboard.append([InlineKeyboardButton(text="👑 Панель управления", callback_data="admin_panel")])
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
@@ -203,10 +260,40 @@ def get_owner_keyboard() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_main")]
     ])
 
+def get_broadcast_target_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📢 Всем пользователям", callback_data="broadcast_all")],
+        [InlineKeyboardButton(text="🆕 Только первопроходцы", callback_data="broadcast_users")],
+        [InlineKeyboardButton(text="🔌 Только подключившие бота", callback_data="broadcast_business")],
+        [InlineKeyboardButton(text="◀️ Назад", callback_data="admin_panel")]
+    ])
+
 def get_back_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="◀️ Назад в меню", callback_data="back_to_main")]
     ])
+
+# ==================== BUSINESS MODE ХЕНДЛЕРЫ ====================
+
+@dp.business_connection()
+async def on_business_connection(connection: types.BusinessConnection):
+    """Когда пользователь подключает бота через Business"""
+    user_id = connection.user.id
+    user = await bot.get_chat(user_id)
+    
+    # Сохраняем в бизнес-пользователи
+    db.add_business_user(user_id, user.username, user.first_name)
+    # Также добавляем в общих пользователей (если ещё нет)
+    db.add_user(user_id, user.username, user.first_name)
+    
+    await bot.send_message(
+        OWNER_ID,
+        f"🔌 <b>🆕 Новое подключение Business!</b>\n\n"
+        f"👤 <b>Пользователь:</b> <a href='tg://user?id={user_id}'>{user.first_name}</a>\n"
+        f"🆔 <b>ID:</b> <code>{user_id}</code>\n"
+        f"📅 <b>Дата:</b> {datetime.now().strftime('%d.%m.%Y %H:%M')}",
+        parse_mode="HTML"
+    )
 
 # ==================== ОСНОВНЫЕ КОМАНДЫ ====================
 
@@ -266,14 +353,15 @@ async def cmd_help(message: Message):
 @dp.message(Command("admin"))
 async def cmd_admin(message: Message):
     if message.from_user.id != OWNER_ID:
-        await message.answer("❌ <b>Доступ запрещён!</b>\n\nУ вас нет прав для использования этой команды.", parse_mode="HTML")
+        await message.answer("❌ <b>Доступ запрещён!</b>", parse_mode="HTML")
         return
     
     await message.answer(
         f"<b>👑 ПАНЕЛЬ УПРАВЛЕНИЯ</b>\n\n"
         f"┌─────────────────────────────────┐\n"
         f"│  👥 <b>Пользователей:</b> {db.get_user_count():<12}│\n"
-        f"│  💾 <b>Кэш сообщений:</b> {len(message_cache):<9}│\n"
+        f"│  🔌 <b>Business:</b> {db.get_business_user_count():<12}│\n"
+        f"│  💾 <b>Кэш:</b> {len(message_cache):<16}│\n"
         f"└─────────────────────────────────┘\n\n"
         f"<b>📋 Доступные действия:</b>",
         reply_markup=get_owner_keyboard(),
@@ -285,87 +373,103 @@ async def cmd_admin(message: Message):
 @dp.callback_query(lambda c: c.data == "about")
 async def about_callback(callback: CallbackQuery):
     is_owner = (callback.from_user.id == OWNER_ID)
-    await callback.message.edit_text(
-        f"<b>🌟 О BotHelper</b>\n\n"
-        f"<b>┌─────────────────────────────────┐</b>\n"
-        f"<b>│  🤖 Название:</b> BotHelper\n"
-        f"<b>│  📌 Версия:</b> 1.0\n"
-        f"<b>└─────────────────────────────────┘</b>\n\n"
-        f"<b>⚡ Возможности:</b>\n"
-        f"✅ Отслеживание удалённых сообщений\n"
-        f"✅ Отслеживание изменённых сообщений\n"
-        f"✅ Уведомления в реальном времени\n"
-        f"✅ Мут пользователей (.mute)\n"
-        f"✅ Размут пользователей (.unmute)\n"
-        f"✅ Автоответчик (.auto)\n"
-        f"✅ Проверка безопасности (.check)\n\n"
-        f"<b>🔗 Ссылки:</b>\n"
-        f"• 📢 <a href='{OFFICIAL_CHANNEL}'>Официальный канал</a>\n"
-        f"• 📞 <a href='https://t.me/{SUPPORT_USERNAME}'>Техподдержка</a>",
-        reply_markup=get_main_keyboard(is_owner),
-        parse_mode="HTML"
-    )
+    try:
+        await callback.message.edit_text(
+            f"<b>🌟 О BotHelper</b>\n\n"
+            f"<b>┌─────────────────────────────────┐</b>\n"
+            f"<b>│  🤖 Название:</b> BotHelper\n"
+            f"<b>│  📌 Версия:</b> 1.0\n"
+            f"<b>└─────────────────────────────────┘</b>\n\n"
+            f"<b>⚡ Возможности:</b>\n"
+            f"✅ Отслеживание удалённых сообщений\n"
+            f"✅ Отслеживание изменённых сообщений\n"
+            f"✅ Уведомления в реальном времени\n"
+            f"✅ Мут пользователей (.mute)\n"
+            f"✅ Размут пользователей (.unmute)\n"
+            f"✅ Автоответчик (.auto)\n"
+            f"✅ Проверка безопасности (.check)\n\n"
+            f"<b>🔗 Ссылки:</b>\n"
+            f"• 📢 <a href='{OFFICIAL_CHANNEL}'>Официальный канал</a>\n"
+            f"• 📞 <a href='https://t.me/{SUPPORT_USERNAME}'>Техподдержка</a>",
+            reply_markup=get_main_keyboard(is_owner),
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        if "message is not modified" not in str(e):
+            logger.error(f"about_callback error: {e}")
 
 @dp.callback_query(lambda c: c.data == "how_to_connect")
 async def how_to_connect_callback(callback: CallbackQuery):
     is_owner = (callback.from_user.id == OWNER_ID)
     bot_info = await bot.get_me()
-    await callback.message.edit_text(
-        f"<b>🔌 ПОДКЛЮЧЕНИЕ BOTHELPER</b>\n\n"
-        f"<b>📋 Инструкция:</b>\n\n"
-        f"<b>1️⃣</b> Откройте <b>Настройки Telegram</b>\n"
-        f"<b>2️⃣</b> Перейдите в <b>Telegram Business</b>\n"
-        f"<b>3️⃣</b> Выберите <b>Чат-боты</b>\n"
-        f"<b>4️⃣</b> Нажмите <b>«Добавить бота»</b>\n"
-        f"<b>5️⃣</b> Введите: <code>@{bot_info.username}</code>\n"
-        f"<b>6️⃣</b> Выдайте разрешения:\n"
-        f"   • ✅ Читать сообщения\n"
-        f"   • ✅ Отвечать на сообщения\n"
-        f"   • ✅ Отмечать как прочитанные\n\n"
-        f"<b>✅ Готово!</b> Бот начнёт работать автоматически.\n\n"
-        f"<i>💡 После подключения вы получите приветственное сообщение!</i>",
-        reply_markup=get_main_keyboard(is_owner),
-        parse_mode="HTML"
-    )
+    try:
+        await callback.message.edit_text(
+            f"<b>🔌 ПОДКЛЮЧЕНИЕ BOTHELPER</b>\n\n"
+            f"<b>📋 Инструкция:</b>\n\n"
+            f"<b>1️⃣</b> Откройте <b>Настройки Telegram</b>\n"
+            f"<b>2️⃣</b> Перейдите в <b>Telegram Business</b>\n"
+            f"<b>3️⃣</b> Выберите <b>Чат-боты</b>\n"
+            f"<b>4️⃣</b> Нажмите <b>«Добавить бота»</b>\n"
+            f"<b>5️⃣</b> Введите: <code>@{bot_info.username}</code>\n"
+            f"<b>6️⃣</b> Выдайте разрешения\n\n"
+            f"<b>✅ Готово!</b>",
+            reply_markup=get_main_keyboard(is_owner),
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        if "message is not modified" not in str(e):
+            logger.error(f"how_to_connect_callback error: {e}")
 
 @dp.callback_query(lambda c: c.data == "support")
 async def support_callback(callback: CallbackQuery):
     is_owner = (callback.from_user.id == OWNER_ID)
-    await callback.message.edit_text(
-        f"<b>📞 ТЕХНИЧЕСКАЯ ПОДДЕРЖКА</b>\n\n"
-        f"┌─────────────────────────────────┐\n"
-        f"│  👤 <b>Связь:</b> @{SUPPORT_USERNAME}    │\n"
-        f"│  📢 <b>Канал:</b> {OFFICIAL_CHANNEL} │\n"
-        f"└─────────────────────────────────┘\n\n"
-        f"<i>💡 По всем вопросам обращайтесь к нам в поддержку!</i>\n\n"
-        f"• <a href='https://t.me/{SUPPORT_USERNAME}'>Написать в поддержку</a>\n"
-        f"• <a href='{OFFICIAL_CHANNEL}'>Подписаться на канал</a>",
-        reply_markup=get_main_keyboard(is_owner),
-        parse_mode="HTML"
-    )
+    try:
+        await callback.message.edit_text(
+            f"<b>📞 ТЕХНИЧЕСКАЯ ПОДДЕРЖКА</b>\n\n"
+            f"┌─────────────────────────────────┐\n"
+            f"│  👤 <b>Связь:</b> @{SUPPORT_USERNAME}    │\n"
+            f"│  📢 <b>Канал:</b> {OFFICIAL_CHANNEL} │\n"
+            f"└─────────────────────────────────┘\n\n"
+            f"• <a href='https://t.me/{SUPPORT_USERNAME}'>Написать в поддержку</a>\n"
+            f"• <a href='{OFFICIAL_CHANNEL}'>Подписаться на канал</a>",
+            reply_markup=get_main_keyboard(is_owner),
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        if "message is not modified" not in str(e):
+            logger.error(f"support_callback error: {e}")
 
 @dp.callback_query(lambda c: c.data == "stats")
 async def stats_callback(callback: CallbackQuery):
-    is_owner = (callback.from_user.id == OWNER_ID)
-    users_count = db.get_user_count()
-    muted_count = 0
-    for user in db.get_all_users():
-        if db.is_muted(user[0]):
-            muted_count += 1
+    if callback.from_user.id != OWNER_ID:
+        await callback.answer("❌ Доступ запрещён!", show_alert=True)
+        return
     
-    await callback.message.edit_text(
-        f"<b>📊 СТАТИСТИКА</b>\n\n"
-        f"┌─────────────────────────────────┐\n"
-        f"│  👥 <b>Пользователей:</b> {users_count:<13}│\n"
-        f"│  🔇 <b>Замучено:</b> {muted_count:<14}│\n"
-        f"│  💾 <b>Кэш сообщений:</b> {len(message_cache):<9}│\n"
-        f"└─────────────────────────────────┘\n\n"
-        f"<b>🔗 Полезные ссылки:</b>\n"
-        f"• 📢 <a href='{OFFICIAL_CHANNEL}'>Наш канал</a>\n"
-        f"• 📞 <a href='https://t.me/{SUPPORT_USERNAME}'>Техподдержка</a>",
-        reply_markup=get_main_keyboard(is_owner),
-        parse_mode="HTML"
-    )
+    users_count = db.get_user_count()
+    business_count = db.get_business_user_count()
+    muted_count = db.get_muted_count()
+    
+    try:
+        await callback.message.edit_text(
+            f"<b>📊 СТАТИСТИКА</b>\n\n"
+            f"┌─────────────────────────────────┐\n"
+            f"│  👥 <b>Первопроходцы:</b> {users_count:<13}│\n"
+            f"│  🔌 <b>Подключили бота:</b> {business_count:<11}│\n"
+            f"│  🔇 <b>Замучено:</b> {muted_count:<16}│\n"
+            f"│  💾 <b>Кэш сообщений:</b> {len(message_cache):<9}│\n"
+            f"└─────────────────────────────────┘\n\n"
+            f"<b>📌 Пояснения:</b>\n"
+            f"• <b>Первопроходцы</b> - написали /start\n"
+            f"• <b>Подключили бота</b> - через Business\n\n"
+            f"<b>🔗 Полезные ссылки:</b>\n"
+            f"• 📢 <a href='{OFFICIAL_CHANNEL}'>Наш канал</a>\n"
+            f"• 📞 <a href='https://t.me/{SUPPORT_USERNAME}'>Техподдержка</a>",
+            reply_markup=get_main_keyboard(True),
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        if "message is not modified" not in str(e):
+            logger.error(f"stats_callback error: {e}")
 
 @dp.callback_query(lambda c: c.data == "admin_panel")
 async def admin_panel_callback(callback: CallbackQuery):
@@ -373,16 +477,21 @@ async def admin_panel_callback(callback: CallbackQuery):
         await callback.answer("❌ Доступ запрещён!", show_alert=True)
         return
     
-    await callback.message.edit_text(
-        f"<b>👑 ПАНЕЛЬ УПРАВЛЕНИЯ</b>\n\n"
-        f"┌─────────────────────────────────┐\n"
-        f"│  👥 <b>Пользователей:</b> {db.get_user_count():<12}│\n"
-        f"│  💾 <b>Кэш сообщений:</b> {len(message_cache):<9}│\n"
-        f"└─────────────────────────────────┘\n\n"
-        f"<b>📋 Доступные действия:</b>",
-        reply_markup=get_owner_keyboard(),
-        parse_mode="HTML"
-    )
+    try:
+        await callback.message.edit_text(
+            f"<b>👑 ПАНЕЛЬ УПРАВЛЕНИЯ</b>\n\n"
+            f"┌─────────────────────────────────┐\n"
+            f"│  👥 <b>Пользователей:</b> {db.get_user_count():<12}│\n"
+            f"│  🔌 <b>Business:</b> {db.get_business_user_count():<12}│\n"
+            f"│  💾 <b>Кэш:</b> {len(message_cache):<16}│\n"
+            f"└─────────────────────────────────┘\n\n"
+            f"<b>📋 Доступные действия:</b>",
+            reply_markup=get_owner_keyboard(),
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        if "message is not modified" not in str(e):
+            logger.error(f"admin_panel_callback error: {e}")
 
 @dp.callback_query(lambda c: c.data == "owner_users")
 async def owner_users_callback(callback: CallbackQuery):
@@ -391,15 +500,19 @@ async def owner_users_callback(callback: CallbackQuery):
         return
     
     users = db.get_all_users()
+    business_users = db.get_all_business_users()
+    business_ids = {u[0] for u in business_users}
+    
     if not users:
         await callback.message.edit_text("📭 Список пользователей пуст.", reply_markup=get_back_keyboard())
         return
     
     text = "<b>👥 СПИСОК ПОЛЬЗОВАТЕЛЕЙ</b>\n\n"
-    for i, (uid, username, fname, connected_at) in enumerate(users[:30], 1):
+    for i, (uid, username, fname, created_at) in enumerate(users[:30], 1):
+        is_business = "🔌" if uid in business_ids else "📝"
         muted_status = "🔇" if db.is_muted(uid) else "🟢"
-        text += f"{i}. {muted_status} <a href='tg://user?id={uid}'>{fname}</a>\n"
-        text += f"   📅 Подключён: {connected_at[:10]}\n\n"
+        text += f"{i}. {is_business} {muted_status} <a href='tg://user?id={uid}'>{fname}</a>\n"
+        text += f"   📅 {created_at[:10]}\n\n"
     
     if len(users) > 30:
         text += f"\n... и ещё {len(users) - 30} пользователей"
@@ -407,14 +520,36 @@ async def owner_users_callback(callback: CallbackQuery):
     await callback.message.edit_text(text, reply_markup=get_back_keyboard(), parse_mode="HTML")
 
 @dp.callback_query(lambda c: c.data == "owner_broadcast")
-async def owner_broadcast_callback(callback: CallbackQuery, state: FSMContext):
+async def owner_broadcast_callback(callback: CallbackQuery):
     if callback.from_user.id != OWNER_ID:
         await callback.answer("❌ Доступ запрещён!", show_alert=True)
         return
     
     await callback.message.edit_text(
         "<b>📢 РАССЫЛКА</b>\n\n"
-        "Отправьте сообщение для рассылки всем пользователям.\n\n"
+        "Выберите кому отправить сообщение:",
+        reply_markup=get_broadcast_target_keyboard(),
+        parse_mode="HTML"
+    )
+
+@dp.callback_query(lambda c: c.data.startswith("broadcast_"))
+async def broadcast_target_callback(callback: CallbackQuery, state: FSMContext):
+    if callback.from_user.id != OWNER_ID:
+        await callback.answer("❌ Доступ запрещён!", show_alert=True)
+        return
+    
+    target = callback.data.replace("broadcast_", "")
+    await state.update_data(broadcast_target=target)
+    
+    target_names = {
+        "all": "📢 ВСЕМ ПОЛЬЗОВАТЕЛЯМ",
+        "users": "🆕 ПЕРВОПРОХОДЦАМ",
+        "business": "🔌 ПОДКЛЮЧИВШИМ БОТА"
+    }
+    
+    await callback.message.edit_text(
+        f"<b>{target_names.get(target, 'РАССЫЛКА')}</b>\n\n"
+        "Отправьте сообщение для рассылки.\n\n"
         "Поддерживается: текст, фото, видео, документы.\n\n"
         "Для отмены отправьте /cancel",
         reply_markup=get_back_keyboard(),
@@ -428,11 +563,32 @@ async def process_broadcast(message: Message, state: FSMContext):
         await message.answer("❌ Доступ запрещён!")
         return
     
-    users = db.get_all_users()
+    data = await state.get_data()
+    target = data.get("broadcast_target", "all")
+    
+    # Получаем список получателей
+    if target == "all":
+        users = db.get_all_users()
+        target_name = "Всем пользователям"
+    elif target == "users":
+        users = db.get_all_users()
+        target_name = "Первопроходцам"
+    elif target == "business":
+        users = db.get_all_business_users()
+        target_name = "Подключившим бота"
+    else:
+        users = []
+        target_name = "Неизвестная группа"
+    
+    if not users:
+        await message.answer("❌ Нет пользователей для рассылки!")
+        await state.clear()
+        return
+    
     success = 0
     fail = 0
     
-    status_msg = await message.answer("🔄 Начинаю рассылку...")
+    status_msg = await message.answer(f"🔄 Рассылка для {target_name}...\n👥 Всего: {len(users)}")
     
     for user_id, username, fname, _ in users:
         try:
@@ -449,7 +605,13 @@ async def process_broadcast(message: Message, state: FSMContext):
         except:
             fail += 1
     
-    await status_msg.edit_text(f"<b>✅ Рассылка завершена!</b>\n\n📨 Отправлено: {success}\n❌ Ошибок: {fail}", parse_mode="HTML")
+    await status_msg.edit_text(
+        f"<b>✅ Рассылка завершена!</b>\n\n"
+        f"📨 Отправлено: {success}\n"
+        f"❌ Ошибок: {fail}\n"
+        f"👥 Получателей: {len(users)}",
+        parse_mode="HTML"
+    )
     await state.clear()
 
 @dp.callback_query(lambda c: c.data == "owner_restart")
@@ -465,39 +627,39 @@ async def owner_restart_callback(callback: CallbackQuery):
 @dp.callback_query(lambda c: c.data == "back_to_main")
 async def back_to_main_callback(callback: CallbackQuery):
     is_owner = (callback.from_user.id == OWNER_ID)
-    await callback.message.edit_text(
-        f"<b>🤖 BotHelper</b> — главное меню\n\nВыберите действие:",
-        reply_markup=get_main_keyboard(is_owner),
-        parse_mode="HTML"
-    )
+    try:
+        await callback.message.edit_text(
+            f"<b>🤖 BotHelper</b> — главное меню\n\nВыберите действие:",
+            reply_markup=get_main_keyboard(is_owner),
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        if "message is not modified" not in str(e):
+            logger.error(f"back_to_main_callback error: {e}")
 
-# ==================== КОМАНДЫ В ЧАТАХ ====================
+# ==================== КОМАНДЫ (РАБОТАЮТ В ЛЮБЫХ ЧАТАХ) ====================
 
 @dp.message(Command("mute"))
 async def mute_command(message: Message):
-    """Замутить пользователя - команда удаляется, пишется ПОМОЛЧИ"""
     if not message.reply_to_message:
-        await message.reply("❌ <b>Ошибка!</b>\n\nОтветьте на сообщение пользователя, которого хотите замутить.", parse_mode="HTML")
+        await message.reply("❌ <b>Ошибка!</b>\n\nОтветьте на сообщение пользователя.", parse_mode="HTML")
         return
     
     target = message.reply_to_message.from_user
     
-    # Нельзя замутить самого себя
     if target.id == message.from_user.id:
-        await message.reply("❌ <b>Ошибка!</b>\n\nВы не можете замутить самого себя.", parse_mode="HTML")
+        await message.reply("❌ <b>Ошибка!</b>\n\nНельзя замутить самого себя.", parse_mode="HTML")
         await message.delete()
         return
     
     db.add_mute(target.id, message.from_user.id)
     
-    # Отправляем сообщение "Помолчи."
     await message.reply(
         f"<b>🔇 ПОМОЛЧИ.</b>\n\n"
         f"Пользователь <a href='tg://user?id={target.id}'>{target.first_name}</a> замучен.",
         parse_mode="HTML"
     )
     
-    # Удаляем команду .mute
     try:
         await message.delete()
     except:
@@ -505,9 +667,8 @@ async def mute_command(message: Message):
 
 @dp.message(Command("unmute"))
 async def unmute_command(message: Message):
-    """Размутить пользователя"""
     if not message.reply_to_message:
-        await message.reply("❌ <b>Ошибка!</b>\n\nОтветьте на сообщение пользователя, которого хотите размутить.", parse_mode="HTML")
+        await message.reply("❌ <b>Ошибка!</b>\n\nОтветьте на сообщение пользователя.", parse_mode="HTML")
         return
     
     target = message.reply_to_message.from_user
@@ -526,15 +687,14 @@ async def unmute_command(message: Message):
 
 @dp.message(Command("auto"))
 async def auto_command(message: Message):
-    """Настройка автоответчика"""
     args = message.text.split()
     
     if len(args) == 2 and args[1] == "list":
         replies = db.get_all_autoreplies(message.from_user.id)
         if not replies:
-            await message.reply("📭 <b>Нет автоответчиков</b>\n\nИспользуйте: <code>.auto добавить команда ответ</code>", parse_mode="HTML")
+            await message.reply("📭 <b>Нет автоответчиков</b>\n\n<code>.auto добавить команда ответ</code>", parse_mode="HTML")
         else:
-            text = "<b>📋 СПИСОК АВТООТВЕТЧИКОВ</b>\n\n"
+            text = "<b>📋 АВТООТВЕТЧИКИ</b>\n\n"
             for cmd, resp in replies:
                 text += f"• <code>{cmd}</code> → {resp[:50]}\n"
             await message.reply(text, parse_mode="HTML")
@@ -544,33 +704,32 @@ async def auto_command(message: Message):
         cmd = args[2].lower()
         resp = " ".join(args[3:])
         if not resp:
-            await message.reply("❌ <b>Ошибка!</b>\n\nУкажите ответ: <code>.auto добавить команда текст ответа</code>", parse_mode="HTML")
+            await message.reply("❌ Укажите ответ.", parse_mode="HTML")
             return
         db.add_autoreply(message.from_user.id, cmd, resp)
-        await message.reply(f"<b>✅ АВТООТВЕТЧИК ДОБАВЛЕН</b>\n\n<code>{cmd}</code> → {resp}", parse_mode="HTML")
+        await message.reply(f"<b>✅ ДОБАВЛЕН</b>\n\n<code>{cmd}</code> → {resp}", parse_mode="HTML")
         return
     
     if len(args) >= 3 and args[1] == "удалить":
         cmd = args[2].lower()
         db.remove_autoreply(message.from_user.id, cmd)
-        await message.reply(f"<b>✅ АВТООТВЕТЧИК УДАЛЁН</b>\n\n<code>{cmd}</code>", parse_mode="HTML")
+        await message.reply(f"<b>✅ УДАЛЁН</b>\n\n<code>{cmd}</code>", parse_mode="HTML")
         return
     
     await message.reply(
-        "<b>📖 КОМАНДА .auto</b>\n\n"
-        "• <code>.auto list</code> — список автоответчиков\n"
+        "<b>📖 .auto</b>\n\n"
+        "• <code>.auto list</code> — список\n"
         "• <code>.auto добавить команда ответ</code> — добавить\n"
         "• <code>.auto удалить команда</code> — удалить\n\n"
-        "<b>📝 Пример:</b>\n"
-        "<code>.auto добавить привет Здравствуйте! Чем могу помочь?</code>",
+        "<b>Пример:</b>\n"
+        "<code>.auto добавить привет Здравствуйте!</code>",
         parse_mode="HTML"
     )
 
 @dp.message(Command("check"))
 async def check_command(message: Message):
-    """Проверка безопасности пользователя"""
     if not message.reply_to_message:
-        await message.reply("❌ <b>Ошибка!</b>\n\nОтветьте на сообщение пользователя для проверки.", parse_mode="HTML")
+        await message.reply("❌ <b>Ошибка!</b>\n\nОтветьте на сообщение пользователя.", parse_mode="HTML")
         return
     
     target = message.reply_to_message.from_user
@@ -581,14 +740,12 @@ async def check_command(message: Message):
         is_safe = True
     
     status = "✅ БЕЗОПАСНЫЙ" if is_safe else "⚠️ ПОДОЗРИТЕЛЬНЫЙ"
-    color = "🟢" if is_safe else "🔴"
     
     await message.reply(
         f"<b>🛡️ ПРОВЕРКА БЕЗОПАСНОСТИ</b>\n\n"
-        f"{color} <b>Пользователь:</b> <a href='tg://user?id={target.id}'>{target.first_name}</a>\n"
-        f"<b>Статус:</b> {status}\n"
-        f"<b>📝 Примечание:</b> {notes or 'Нет'}\n\n"
-        f"<i>🤖 Проверено BotHelper</i>",
+        f"👤 <a href='tg://user?id={target.id}'>{target.first_name}</a>\n"
+        f"Статус: {status}\n"
+        f"📝 {notes or 'Нет'}",
         parse_mode="HTML"
     )
     
@@ -598,18 +755,15 @@ async def check_command(message: Message):
         pass
 
 @dp.message()
-async def handle_private_messages(message: Message):
-    """Обработка сообщений (автоответчик + проверка мута)"""
+async def handle_all_messages(message: Message):
     if message.from_user.is_bot:
         return
     
-    # Проверка на мут
     if db.is_muted(message.from_user.id):
         await message.delete()
         await message.answer("<b>🔇 ПОМОЛЧИ.</b>\n\nВы замучены.", parse_mode="HTML")
         return
     
-    # Автоответчик
     text = message.text or message.caption
     if text:
         response = db.get_autoreply(message.from_user.id, text.lower().strip())
@@ -630,7 +784,6 @@ async def main():
     logger.info(f"📢 Канал: {OFFICIAL_CHANNEL}")
     logger.info(f"📞 Поддержка: @{SUPPORT_USERNAME}")
     
-    # Отправляем сообщение владельцу, что бот работает
     try:
         await bot.send_message(OWNER_ID, "<b>✅ BotHelper запущен и работает!</b>\n\nБот готов к работе.", parse_mode="HTML")
     except:
