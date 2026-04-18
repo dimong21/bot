@@ -115,7 +115,7 @@ class Database:
                 ("delay", "INTEGER DEFAULT 0")
             ])
             
-            # Таблица истории сообщений (для отслеживания изменений/удалений)
+            # Таблица истории сообщений
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS message_history (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -263,13 +263,6 @@ class Database:
             """, (owner_id, chat_id, message_id))
             row = cursor.fetchone()
             return row[0] if row else None
-    
-    def delete_message_record(self, owner_id: int, chat_id: int, message_id: int):
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("DELETE FROM message_history WHERE owner_id = ? AND chat_id = ? AND message_id = ?", 
-                          (owner_id, chat_id, message_id))
-            conn.commit()
 
 # Инициализация БД
 db = Database()
@@ -281,14 +274,12 @@ class BroadcastStates(StatesGroup):
     waiting_for_confirm = State()
 
 class AutoresponderStates(StatesGroup):
-    waiting_for_mode = State()
     waiting_for_text = State()
     waiting_for_delay = State()
 
 # ==================== КЛАВИАТУРЫ ====================
 
 def get_start_keyboard(user_id: int) -> InlineKeyboardMarkup:
-    """Главное меню с проверкой на владельца"""
     buttons = [
         [InlineKeyboardButton(text="ℹ️ Информация о боте", callback_data="info")],
         [InlineKeyboardButton(text="📖 Инструкция установки", callback_data="install")],
@@ -302,7 +293,6 @@ def get_start_keyboard(user_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 def get_admin_keyboard() -> InlineKeyboardMarkup:
-    """Клавиатура панели управления"""
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📊 Статистика", callback_data="admin_stats")],
         [InlineKeyboardButton(text="📨 Рассылка", callback_data="admin_broadcast")],
@@ -311,7 +301,6 @@ def get_admin_keyboard() -> InlineKeyboardMarkup:
     ])
 
 def get_broadcast_type_keyboard() -> InlineKeyboardMarkup:
-    """Выбор типа рассылки"""
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📢 Всем пользователям", callback_data="broadcast_all")],
         [InlineKeyboardButton(text="✅ Подключенным", callback_data="broadcast_connected")],
@@ -320,7 +309,6 @@ def get_broadcast_type_keyboard() -> InlineKeyboardMarkup:
     ])
 
 def get_autoresponder_keyboard(enabled: bool = False) -> InlineKeyboardMarkup:
-    """Клавиатура управления автоответчиком"""
     status_text = "🟢 Включен" if enabled else "🔴 Выключен"
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=f"Статус: {status_text}", callback_data="auto_status")],
@@ -339,9 +327,6 @@ def get_back_keyboard() -> InlineKeyboardMarkup:
 # ==================== КОМАНДЫ БОТА ====================
 
 async def set_bot_commands(bot: Bot):
-    """Установка красивого меню команд"""
-    
-    # Основные команды для всех
     main_commands = [
         BotCommand(command="start", description="🚀 Старт / Главное меню"),
         BotCommand(command="me", description="👤 Мой профиль"),
@@ -351,7 +336,6 @@ async def set_bot_commands(bot: Bot):
     ]
     await bot.set_my_commands(main_commands, scope=BotCommandScopeDefault())
     
-    # Команды для владельца
     if OWNER_ID:
         owner_commands = main_commands + [
             BotCommand(command="admin", description="⚙️ Панель управления"),
@@ -372,7 +356,7 @@ class IsBusinessChatFilter(Filter):
     async def __call__(self, message: Message) -> bool:
         return message.business_connection_id is not None
 
-# ==================== ОБРАБОТЧИКИ ====================
+# ==================== ДИСПЕТЧЕР И РОУТЕР ====================
 
 dp = Dispatcher(storage=MemoryStorage())
 router = Router()
@@ -382,7 +366,6 @@ dp.include_router(router)
 
 @router.message(Command("start"))
 async def cmd_start(message: Message, state: FSMContext):
-    """Обработчик команды /start"""
     user = message.from_user
     db.add_user(user.id, user.username, user.first_name, user.last_name)
     
@@ -413,11 +396,9 @@ async def cmd_start(message: Message, state: FSMContext):
 
 @router.message(Command("me"))
 async def cmd_me(message: Message):
-    """Профиль пользователя"""
     user = message.from_user
     db.add_user(user.id, user.username, user.first_name, user.last_name)
     
-    # Получаем статус подключения
     is_connected = user.id in db.get_connected_users()
     ar_settings = db.get_autoresponder(user.id)
     
@@ -446,7 +427,6 @@ async def cmd_me(message: Message):
 
 @router.message(Command("support"))
 async def cmd_support(message: Message):
-    """Поддержка"""
     support_text = f"""
 <b>🆘 Поддержка BotHelper</b>
 
@@ -472,7 +452,6 @@ async def cmd_support(message: Message):
 
 @router.message(Command("tg"))
 async def cmd_tg(message: Message):
-    """Официальный Telegram"""
     await message.answer(
         f"📢 <b>Официальный Telegram канал</b>\n\nПодписывайся, чтобы быть в курсе обновлений: @{OFFICIAL_TG}",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
@@ -483,7 +462,6 @@ async def cmd_tg(message: Message):
 
 @router.message(Command("help"))
 async def cmd_help(message: Message):
-    """Помощь по командам"""
     help_text = """
 <b>❓ Помощь по командам BotHelper</b>
 
@@ -512,7 +490,6 @@ async def cmd_help(message: Message):
 
 @router.message(Command("admin"), IsOwnerFilter())
 async def cmd_admin(message: Message):
-    """Панель управления для владельца"""
     stats = db.get_stats()
     
     admin_text = f"""
@@ -530,7 +507,6 @@ async def cmd_admin(message: Message):
 
 @router.message(Command("stats"), IsOwnerFilter())
 async def cmd_stats(message: Message):
-    """Статистика бота"""
     stats = db.get_stats()
     
     stats_text = f"""
@@ -541,19 +517,12 @@ async def cmd_stats(message: Message):
 ├ Подключенных: {stats['connected']}
 ├ Неподключенных: {stats['unconnected']}
 └ Конверсия: {(stats['connected']/stats['total']*100 if stats['total'] > 0 else 0):.1f}%
-
-<b>🤖 Автоответчики:</b>
-└ Активных: 0
-
-<b>📅 За сегодня:</b>
-└ Новых: 0
 """
     
     await message.answer(stats_text, parse_mode=ParseMode.HTML)
 
 @router.message(Command("broadcast"), IsOwnerFilter())
 async def cmd_broadcast(message: Message, state: FSMContext):
-    """Начало рассылки"""
     await message.answer(
         "<b>📨 Рассылка сообщений</b>\n\nВыбери тип рассылки:",
         reply_markup=get_broadcast_type_keyboard(),
@@ -564,7 +533,6 @@ async def cmd_broadcast(message: Message, state: FSMContext):
 
 @router.callback_query(F.data == "info")
 async def callback_info(callback: CallbackQuery):
-    """Информация о боте"""
     info_text = """
 <b>ℹ️ О боте BotHelper</b>
 
@@ -573,16 +541,8 @@ async def callback_info(callback: CallbackQuery):
 • 🔇 Модерация чатов (.mute / .unmute)
 • 💬 Умный автоответчик
 • ❤️ Love-команды и эффекты
-• 📊 Статистика и аналитика
-
-<b>🔧 Технические особенности:</b>
-• Работает через Telegram Business API
-• SQLite база данных
-• Асинхронная обработка
-• Полная конфиденциальность
 
 <b>📌 Версия:</b> 1.0.0
-<b>📅 Обновлено:</b> 17.04.2026
 """
     
     await callback.message.edit_text(
@@ -594,7 +554,6 @@ async def callback_info(callback: CallbackQuery):
 
 @router.callback_query(F.data == "install")
 async def callback_install(callback: CallbackQuery):
-    """Инструкция по установке"""
     bot_username = (await callback.bot.me()).username
     
     install_text = f"""
@@ -611,7 +570,6 @@ async def callback_install(callback: CallbackQuery):
 
 <b>3️⃣ Шаг 3: Настройка</b>
 • Выбери, в каких чатах бот будет работать
-• Настрой права доступа
 • Готово!
 
 <b>💡 Доступные команды в чатах:</b>
@@ -619,8 +577,6 @@ async def callback_install(callback: CallbackQuery):
 • <code>.unmute</code> — размутить
 • <code>.love</code> — love-сообщение
 • <code>.help</code> — справка
-
-<i>После подключения бот начнёт отслеживать изменения сообщений и выполнять команды!</i>
 """
     
     await callback.message.edit_text(
@@ -632,7 +588,6 @@ async def callback_install(callback: CallbackQuery):
 
 @router.callback_query(F.data == "support")
 async def callback_support(callback: CallbackQuery):
-    """Поддержка через callback"""
     await callback.message.edit_text(
         f"<b>🆘 Поддержка</b>\n\nНапиши нам: @{SUPPORT_USERNAME}",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
@@ -645,13 +600,12 @@ async def callback_support(callback: CallbackQuery):
 
 @router.callback_query(F.data == "back_to_start")
 async def callback_back_to_start(callback: CallbackQuery):
-    """Возврат в главное меню"""
     user = callback.from_user
     
     welcome_text = f"""
 <b>👋 Привет, {user.first_name}!</b>
 
-Добро пожаловать в <b>BotHelper</b> — твоего персонального помощника с функциями модерации и автоответчика!
+Добро пожаловать в <b>BotHelper</b> — твоего персонального помощника!
 
 Выбери нужный раздел ниже 👇
 """
@@ -667,7 +621,6 @@ async def callback_back_to_start(callback: CallbackQuery):
 
 @router.callback_query(F.data == "admin_panel", IsOwnerFilter())
 async def callback_admin_panel(callback: CallbackQuery):
-    """Панель управления"""
     stats = db.get_stats()
     
     admin_text = f"""
@@ -690,7 +643,6 @@ async def callback_admin_panel(callback: CallbackQuery):
 
 @router.callback_query(F.data == "admin_stats", IsOwnerFilter())
 async def callback_admin_stats(callback: CallbackQuery):
-    """Статистика"""
     stats = db.get_stats()
     users = db.get_all_users()
     
@@ -721,7 +673,6 @@ async def callback_admin_stats(callback: CallbackQuery):
 
 @router.callback_query(F.data == "admin_broadcast", IsOwnerFilter())
 async def callback_admin_broadcast(callback: CallbackQuery):
-    """Меню рассылки"""
     await callback.message.edit_text(
         "<b>📨 Рассылка сообщений</b>\n\nВыбери тип рассылки:",
         reply_markup=get_broadcast_type_keyboard(),
@@ -731,7 +682,6 @@ async def callback_admin_broadcast(callback: CallbackQuery):
 
 @router.callback_query(F.data == "admin_users", IsOwnerFilter())
 async def callback_admin_users(callback: CallbackQuery):
-    """Список пользователей"""
     users = db.get_all_users()
     
     if not users:
@@ -744,7 +694,6 @@ async def callback_admin_users(callback: CallbackQuery):
         await callback.answer()
         return
     
-    # Формируем текст по 10 пользователей
     page = 0
     per_page = 10
     total_pages = (len(users) - 1) // per_page + 1
@@ -770,7 +719,6 @@ async def callback_admin_users(callback: CallbackQuery):
 
 @router.callback_query(F.data.startswith("broadcast_"), IsOwnerFilter())
 async def callback_broadcast_type(callback: CallbackQuery, state: FSMContext):
-    """Выбор типа рассылки и запрос сообщения"""
     broadcast_type = callback.data.replace("broadcast_", "")
     
     type_names = {
@@ -784,7 +732,7 @@ async def callback_broadcast_type(callback: CallbackQuery, state: FSMContext):
     
     await callback.message.edit_text(
         f"<b>📨 Рассылка для: {type_names.get(broadcast_type, broadcast_type)}</b>\n\n"
-        "Отправь сообщение для рассылки (можно с фото, видео, форматированием):",
+        "Отправь сообщение для рассылки:",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="🔙 Отмена", callback_data="admin_panel")]
         ]),
@@ -794,11 +742,9 @@ async def callback_broadcast_type(callback: CallbackQuery, state: FSMContext):
 
 @router.message(BroadcastStates.waiting_for_broadcast_message, IsOwnerFilter())
 async def process_broadcast_message(message: Message, state: FSMContext, bot: Bot):
-    """Обработка сообщения для рассылки"""
     data = await state.get_data()
     broadcast_type = data.get("broadcast_type", "all")
     
-    # Сохраняем сообщение в state
     await state.update_data(broadcast_message=message.model_dump())
     await state.set_state(BroadcastStates.waiting_for_confirm)
     
@@ -827,12 +773,10 @@ async def process_broadcast_message(message: Message, state: FSMContext, bot: Bo
 
 @router.callback_query(F.data == "broadcast_confirm", IsOwnerFilter())
 async def callback_broadcast_confirm(callback: CallbackQuery, state: FSMContext, bot: Bot):
-    """Подтверждение и отправка рассылки (прогресс виден только владельцу)"""
     data = await state.get_data()
     broadcast_type = data.get("broadcast_type", "all")
     msg_data = data.get("broadcast_message", {})
     
-    # Получаем список получателей
     if broadcast_type == "all":
         recipients = [u[0] for u in db.get_all_users()]
     elif broadcast_type == "connected":
@@ -840,7 +784,6 @@ async def callback_broadcast_confirm(callback: CallbackQuery, state: FSMContext,
     else:
         recipients = db.get_unconnected_users()
     
-    # Сообщение с прогрессом (видно только владельцу)
     progress_text = f"""
 📨 <b>Рассылка запущена</b>
 
@@ -849,59 +792,29 @@ async def callback_broadcast_confirm(callback: CallbackQuery, state: FSMContext,
 └ Прогресс: 0/{len(recipients)} (0%)
 """
     
-    progress_msg = await callback.message.edit_text(
-        progress_text,
-        parse_mode=ParseMode.HTML
-    )
+    progress_msg = await callback.message.edit_text(progress_text, parse_mode=ParseMode.HTML)
     
     success = 0
     failed = 0
     
     for i, user_id in enumerate(recipients):
         try:
-            # Пересылаем сохранённое сообщение
             if msg_data.get("text"):
-                await bot.send_message(
-                    user_id,
-                    msg_data["text"],
-                    parse_mode=ParseMode.HTML if msg_data.get("entities") else None
-                )
+                await bot.send_message(user_id, msg_data["text"])
             elif msg_data.get("photo"):
-                await bot.send_photo(
-                    user_id,
-                    msg_data["photo"][-1]["file_id"],
-                    caption=msg_data.get("caption")
-                )
+                await bot.send_photo(user_id, msg_data["photo"][-1]["file_id"], caption=msg_data.get("caption"))
             elif msg_data.get("video"):
-                await bot.send_video(
-                    user_id,
-                    msg_data["video"]["file_id"],
-                    caption=msg_data.get("caption")
-                )
-            elif msg_data.get("animation"):
-                await bot.send_animation(
-                    user_id,
-                    msg_data["animation"]["file_id"],
-                    caption=msg_data.get("caption")
-                )
-            elif msg_data.get("document"):
-                await bot.send_document(
-                    user_id,
-                    msg_data["document"]["file_id"],
-                    caption=msg_data.get("caption")
-                )
+                await bot.send_video(user_id, msg_data["video"]["file_id"], caption=msg_data.get("caption"))
             success += 1
         except Exception as e:
             logger.error(f"Ошибка отправки пользователю {user_id}: {e}")
             failed += 1
         
-        # Обновляем прогресс каждые 5 отправок или в конце (видно только владельцу)
         if (i + 1) % 5 == 0 or i == len(recipients) - 1:
             percent = round((i + 1) / len(recipients) * 100)
             progress_text = f"""
 📨 <b>Рассылка в процессе</b>
 
-├ Тип: <b>{broadcast_type}</b>
 ├ Всего: <b>{len(recipients)}</b>
 ├ Прогресс: <b>{i + 1}/{len(recipients)}</b> ({percent}%)
 ├ ✅ Успешно: <b>{success}</b>
@@ -911,18 +824,15 @@ async def callback_broadcast_confirm(callback: CallbackQuery, state: FSMContext,
                 await progress_msg.edit_text(progress_text, parse_mode=ParseMode.HTML)
             except:
                 pass
-            
             await asyncio.sleep(0.3)
     
-    # Итоговый отчёт (виден только владельцу)
     final_text = f"""
 ✅ <b>Рассылка завершена!</b>
 
 📊 <b>Результаты:</b>
-├ Тип рассылки: <b>{broadcast_type}</b>
-├ Всего получателей: <b>{len(recipients)}</b>
-├ ✅ Успешно доставлено: <b>{success}</b>
-└ ❌ Ошибок доставки: <b>{failed}</b>
+├ Всего: <b>{len(recipients)}</b>
+├ ✅ Успешно: <b>{success}</b>
+└ ❌ Ошибок: <b>{failed}</b>
 """
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -931,7 +841,6 @@ async def callback_broadcast_confirm(callback: CallbackQuery, state: FSMContext,
     ])
     
     await progress_msg.edit_text(final_text, reply_markup=keyboard, parse_mode=ParseMode.HTML)
-    
     await state.clear()
     await callback.answer("✅ Рассылка завершена!")
 
@@ -939,7 +848,6 @@ async def callback_broadcast_confirm(callback: CallbackQuery, state: FSMContext,
 
 @router.message(Command("autoresponder"))
 async def cmd_autoresponder(message: Message):
-    """Настройка автоответчика"""
     user_id = message.from_user.id
     ar_settings = db.get_autoresponder(user_id)
     
@@ -950,12 +858,7 @@ async def cmd_autoresponder(message: Message):
     enabled, mode, custom_text, delay = ar_settings
     
     status = "🟢 Включен" if enabled else "🔴 Выключен"
-    modes = {
-        "simple": "Простой ответ",
-        "random": "Случайный ответ",
-        "echo": "Эхо (повтор)",
-        "custom": "Свой текст"
-    }
+    modes = {"simple": "Простой ответ", "random": "Случайный ответ", "echo": "Эхо", "custom": "Свой текст"}
     
     text = f"""
 <b>💬 Настройка автоответчика</b>
@@ -969,15 +872,10 @@ async def cmd_autoresponder(message: Message):
 Выбери действие:
 """
     
-    await message.answer(
-        text,
-        reply_markup=get_autoresponder_keyboard(enabled),
-        parse_mode=ParseMode.HTML
-    )
+    await message.answer(text, reply_markup=get_autoresponder_keyboard(enabled), parse_mode=ParseMode.HTML)
 
 @router.callback_query(F.data == "auto_toggle")
 async def callback_auto_toggle(callback: CallbackQuery):
-    """Включение/выключение автоответчика"""
     user_id = callback.from_user.id
     ar_settings = db.get_autoresponder(user_id)
     
@@ -990,38 +888,10 @@ async def callback_auto_toggle(callback: CallbackQuery):
     
     status = "🟢 включен" if new_enabled else "🔴 выключен"
     await callback.answer(f"Автоответчик {status}")
-    
-    # Обновляем сообщение
-    ar_settings = db.get_autoresponder(user_id)
-    if ar_settings:
-        enabled, mode, custom_text, delay = ar_settings
-    else:
-        enabled, mode, custom_text, delay = False, "simple", None, 0
-    
-    modes = {"simple": "Простой", "random": "Случайный", "echo": "Эхо", "custom": "Свой"}
-    status_text = "🟢 Включен" if enabled else "🔴 Выключен"
-    
-    text = f"""
-<b>💬 Настройка автоответчика</b>
-
-<b>📊 Текущие настройки:</b>
-├ Статус: {status_text}
-├ Режим: {modes.get(mode, mode)}
-├ Задержка: {delay} сек
-└ Свой текст: {custom_text or 'не задан'}
-
-Выбери действие:
-"""
-    
-    await callback.message.edit_text(
-        text,
-        reply_markup=get_autoresponder_keyboard(enabled),
-        parse_mode=ParseMode.HTML
-    )
+    await callback_back_to_auto_settings(callback)
 
 @router.callback_query(F.data == "auto_mode")
-async def callback_auto_mode(callback: CallbackQuery, state: FSMContext):
-    """Выбор режима автоответчика"""
+async def callback_auto_mode(callback: CallbackQuery):
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📝 Простой ответ", callback_data="auto_mode_simple")],
         [InlineKeyboardButton(text="🎲 Случайный ответ", callback_data="auto_mode_random")],
@@ -1030,20 +900,14 @@ async def callback_auto_mode(callback: CallbackQuery, state: FSMContext):
         [InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_auto_settings")]
     ])
     
-    await callback.message.edit_text(
-        "<b>Выбери режим автоответчика:</b>",
-        reply_markup=keyboard,
-        parse_mode=ParseMode.HTML
-    )
+    await callback.message.edit_text("<b>Выбери режим автоответчика:</b>", reply_markup=keyboard, parse_mode=ParseMode.HTML)
     await callback.answer()
 
 @router.callback_query(F.data == "auto_custom")
 async def callback_auto_custom(callback: CallbackQuery, state: FSMContext):
-    """Установка своего текста"""
     await state.set_state(AutoresponderStates.waiting_for_text)
     await callback.message.edit_text(
-        "<b>✏️ Введи свой текст для автоответчика:</b>\n\n"
-        "<i>Этот текст будет отправляться в ответ на любое сообщение</i>",
+        "<b>✏️ Введи свой текст для автоответчика:</b>",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="🔙 Отмена", callback_data="back_to_auto_settings")]
         ]),
@@ -1053,7 +917,6 @@ async def callback_auto_custom(callback: CallbackQuery, state: FSMContext):
 
 @router.message(AutoresponderStates.waiting_for_text)
 async def process_custom_text(message: Message, state: FSMContext):
-    """Обработка своего текста"""
     user_id = message.from_user.id
     custom_text = message.text
     
@@ -1074,7 +937,6 @@ async def process_custom_text(message: Message, state: FSMContext):
 
 @router.callback_query(F.data == "auto_delay")
 async def callback_auto_delay(callback: CallbackQuery, state: FSMContext):
-    """Установка задержки"""
     await state.set_state(AutoresponderStates.waiting_for_delay)
     await callback.message.edit_text(
         "<b>⏱ Введи задержку в секундах (0-60):</b>",
@@ -1087,7 +949,6 @@ async def callback_auto_delay(callback: CallbackQuery, state: FSMContext):
 
 @router.message(AutoresponderStates.waiting_for_delay)
 async def process_delay(message: Message, state: FSMContext):
-    """Обработка задержки"""
     user_id = message.from_user.id
     
     try:
@@ -1113,18 +974,12 @@ async def process_delay(message: Message, state: FSMContext):
     )
 
 @router.callback_query(F.data.startswith("auto_mode_"))
-async def callback_auto_mode_set(callback: CallbackQuery, state: FSMContext):
-    """Установка режима автоответчика"""
+async def callback_auto_mode_set(callback: CallbackQuery):
     mode = callback.data.replace("auto_mode_", "")
     user_id = callback.from_user.id
     ar_settings = db.get_autoresponder(user_id)
     
-    mode_names = {
-        "simple": "Простой ответ",
-        "random": "Случайный ответ", 
-        "echo": "Эхо",
-        "custom": "Свой текст"
-    }
+    mode_names = {"simple": "Простой ответ", "random": "Случайный ответ", "echo": "Эхо", "custom": "Свой текст"}
     
     if ar_settings:
         db.set_autoresponder(user_id, ar_settings[0], mode, ar_settings[2], ar_settings[3])
@@ -1142,13 +997,11 @@ async def callback_auto_mode_set(callback: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data == "auto_status")
 async def callback_auto_status(callback: CallbackQuery):
-    """Показ текущего статуса"""
     await callback.answer("Используй кнопку Вкл/Выкл для изменения")
     await callback_back_to_auto_settings(callback)
 
 @router.callback_query(F.data == "back_to_auto_settings")
 async def callback_back_to_auto_settings(callback: CallbackQuery):
-    """Возврат к настройкам автоответчика"""
     user_id = callback.from_user.id
     ar_settings = db.get_autoresponder(user_id)
     
@@ -1171,35 +1024,29 @@ async def callback_back_to_auto_settings(callback: CallbackQuery):
 Выбери действие:
 """
     
-    await callback.message.edit_text(
-        text,
-        reply_markup=get_autoresponder_keyboard(enabled),
-        parse_mode=ParseMode.HTML
-    )
+    await callback.message.edit_text(text, reply_markup=get_autoresponder_keyboard(enabled), parse_mode=ParseMode.HTML)
     await callback.answer()
 
-# ==================== TELEGRAM BUSINESS ОБРАБОТЧИКИ ====================
+# ==================== TELEGRAM BUSINESS ОБРАБОТЧИКИ (НА DP!) ====================
 
-@router.business_connection()
+@dp.business_connection()
 async def on_business_connection(business_connection: BusinessConnection, bot: Bot):
-    """Обработчик подключения/отключения бизнес-аккаунта"""
     user_id = business_connection.user.id
     is_enabled = not business_connection.is_disabled
     
     db.update_connection_status(user_id, is_enabled)
     
     if is_enabled:
-        # Отправляем приветственное сообщение в ЛС
         welcome_text = f"""
 <b>✅ BotHelper успешно подключен как Telegram Business!</b>
 
 <b>🎉 Теперь тебе доступны все функции:</b>
 
 <b>💬 Команды в чатах:</b>
-• <code>.mute</code> — замутить собеседника (только для тебя)
+• <code>.mute</code> — замутить собеседника
 • <code>.unmute</code> — размутить
 • <code>.love</code> — красивое love-сообщение
-• <code>.help</code> — справка по командам
+• <code>.help</code> — справка
 
 <b>📝 Функции:</b>
 • Отслеживание изменённых сообщений
@@ -1217,9 +1064,8 @@ async def on_business_connection(business_connection: BusinessConnection, bot: B
         except Exception as e:
             logger.error(f"Не удалось отправить приветствие пользователю {user_id}: {e}")
 
-@router.business_message(IsBusinessChatFilter())
+@dp.business_message(IsBusinessChatFilter())
 async def on_business_message(message: Message, bot: Bot):
-    """Обработчик бизнес-сообщений"""
     if not message.business_connection_id:
         return
     
@@ -1227,66 +1073,55 @@ async def on_business_message(message: Message, bot: Bot):
     chat_id = message.chat.id
     user = message.from_user if message.from_user else None
     
-    # Сохраняем сообщение в историю
     if message.text:
         db.save_message(owner_id, chat_id, message.message_id, user.id if user else 0, message.text)
     
-    # Проверяем на команды с точкой
     if message.text and message.text.startswith('.'):
         await handle_dot_command(message, bot)
         return
     
-    # Проверяем мут
     if user and db.is_muted(owner_id, user.id):
         try:
             await message.delete()
-            logger.info(f"Удалено сообщение от замученного пользователя {user.id} для {owner_id}")
         except Exception as e:
             logger.error(f"Ошибка удаления сообщения: {e}")
         return
     
-    # Автоответчик
     ar_settings = db.get_autoresponder(owner_id)
-    if ar_settings and ar_settings[0]:  # если включен
+    if ar_settings and ar_settings[0]:
         await handle_autoresponder(message, bot, ar_settings)
 
-@router.edited_business_message()
+@dp.edited_business_message()
 async def on_business_message_edited(message: Message, bot: Bot):
-    """Обработчик изменённых бизнес-сообщений"""
     owner_id = message.from_user.id
     chat_id = message.chat.id
     user = message.from_user
     
-    # Получаем старое сообщение из БД
     old_text = db.get_message(owner_id, chat_id, message.message_id)
     
     if old_text and old_text != message.text:
-        # Отправляем уведомление владельцу
         user_info = f"@{user.username}" if user.username else user.first_name
         notification = f"""
 <b>📝 Изменение произошло в чате</b>
 
 <b>👤 Пользователь:</b> {user_info}
-<b>🆔 ID:</b> <code>{user.id}</code>
 
 <b>📋 Было:</b>
-{old_text[:500] + '...' if len(old_text) > 500 else old_text}
+{old_text[:500]}
 
 <b>📋 Стало:</b>
-{message.text[:500] + '...' if len(message.text) > 500 else message.text}
+{message.text[:500]}
 """
         try:
             await bot.send_message(owner_id, notification, parse_mode=ParseMode.HTML)
         except Exception as e:
             logger.error(f"Ошибка отправки уведомления об изменении: {e}")
     
-    # Обновляем в БД
     if message.text:
         db.save_message(owner_id, chat_id, message.message_id, user.id, message.text)
 
-@router.business_messages_deleted()
+@dp.business_messages_deleted()
 async def on_business_messages_deleted(event: BusinessMessagesDeleted, bot: Bot):
-    """Обработчик удалённых бизнес-сообщений"""
     owner_id = event.business_connection_id
     chat_id = event.chat.id
     message_ids = event.message_ids
@@ -1298,7 +1133,7 @@ async def on_business_messages_deleted(event: BusinessMessagesDeleted, bot: Bot)
 <b>🗑 Сообщение удалено в чате</b>
 
 <b>📋 Содержимое:</b>
-{old_text[:500] + '...' if len(old_text) > 500 else old_text}
+{old_text[:500]}
 """
             try:
                 await bot.send_message(owner_id, notification, parse_mode=ParseMode.HTML)
@@ -1306,7 +1141,6 @@ async def on_business_messages_deleted(event: BusinessMessagesDeleted, bot: Bot)
                 logger.error(f"Ошибка отправки уведомления об удалении: {e}")
 
 async def handle_dot_command(message: Message, bot: Bot):
-    """Обработка команд с точкой (.mute, .unmute, .love, .help)"""
     if not message.text:
         return
     
@@ -1314,7 +1148,6 @@ async def handle_dot_command(message: Message, bot: Bot):
     owner_id = message.from_user.id
     
     if command == ".mute":
-        # Определяем цель (ответ на сообщение)
         target_id = None
         if message.reply_to_message:
             target_id = message.reply_to_message.from_user.id
@@ -1323,14 +1156,8 @@ async def handle_dot_command(message: Message, bot: Bot):
         if target_id:
             db.add_mute(owner_id, target_id)
             await message.delete()
-            
-            # Отправляем уведомление (только владелец видит)
             try:
-                await bot.send_message(
-                    owner_id,
-                    f"🔇 <b>Молчать.</b> Пользователь {target_name} замучен для вас.",
-                    parse_mode=ParseMode.HTML
-                )
+                await bot.send_message(owner_id, f"🔇 <b>Молчать.</b> Пользователь {target_name} замучен для вас.", parse_mode=ParseMode.HTML)
             except:
                 pass
     
@@ -1343,38 +1170,20 @@ async def handle_dot_command(message: Message, bot: Bot):
         if target_id:
             db.remove_mute(owner_id, target_id)
             await message.delete()
-            
             try:
-                await bot.send_message(
-                    owner_id,
-                    f"🔈 <b>Говори.</b> Пользователь {target_name} размучен.",
-                    parse_mode=ParseMode.HTML
-                )
+                await bot.send_message(owner_id, f"🔈 <b>Говори.</b> Пользователь {target_name} размучен.", parse_mode=ParseMode.HTML)
             except:
                 pass
     
     elif command == ".love":
-        # Красивое love-сообщение
         target_name = "тебя"
         if message.reply_to_message:
             target_name = message.reply_to_message.from_user.first_name
         
-        love_messages = [
-            f"❤️ {target_name} ❤️",
-            f"💕 {target_name} 💕",
-            f"💗 {target_name} 💗",
-            f"💓 {target_name} 💓",
-            f"💖 {target_name} 💖",
-            f"💘 {target_name} 💘",
-            f"💝 {target_name} 💝",
-            f"🌸 {target_name} 🌸",
-            f"✨ {target_name} ✨",
-            f"🦋 {target_name} 🦋",
-        ]
-        
+        love_messages = [f"❤️ {target_name} ❤️", f"💕 {target_name} 💕", f"💗 {target_name} 💗", 
+                         f"💖 {target_name} 💖", f"💘 {target_name} 💘", f"💝 {target_name} 💝"]
         love_text = random.choice(love_messages)
         
-        # Отправляем и оставляем сообщение
         await message.answer(love_text)
         await message.delete()
     
@@ -1382,12 +1191,10 @@ async def handle_dot_command(message: Message, bot: Bot):
         help_text = """
 <b>💬 Команды BotHelper в чатах:</b>
 
-<b>.mute</b> — замутить пользователя (только для вас)
+<b>.mute</b> — замутить пользователя
 <b>.unmute</b> — размутить пользователя  
-<b>.love</b> — отправить красивое love-сообщение
-<b>.help</b> — показать эту справку
-
-<i>Команды работают только при подключенном Telegram Business!</i>
+<b>.love</b> — love-сообщение
+<b>.help</b> — справка
 """
         try:
             await bot.send_message(owner_id, help_text, parse_mode=ParseMode.HTML)
@@ -1396,13 +1203,11 @@ async def handle_dot_command(message: Message, bot: Bot):
             pass
 
 async def handle_autoresponder(message: Message, bot: Bot, ar_settings: Tuple):
-    """Обработка автоответчика"""
     enabled, mode, custom_text, delay = ar_settings
     
     if not enabled:
         return
     
-    # Задержка
     if delay > 0:
         await asyncio.sleep(delay)
     
@@ -1423,24 +1228,16 @@ async def handle_autoresponder(message: Message, bot: Bot, ar_settings: Tuple):
 # ==================== ЗАПУСК ====================
 
 async def main():
-    """Главная функция запуска"""
     logger.info("🤖 BotHelper запускается...")
     
-    # Проверяем токен
     if not BOT_TOKEN:
         logger.error("❌ BOT_TOKEN не найден в .env файле!")
         sys.exit(1)
     
-    # Инициализируем бота
-    bot = Bot(
-        token=BOT_TOKEN,
-        default=DefaultBotProperties(parse_mode=ParseMode.HTML)
-    )
+    bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     
-    # Устанавливаем команды
     await set_bot_commands(bot)
     
-    # Запускаем polling
     logger.info("✅ Бот запущен и готов к работе!")
     
     try:
